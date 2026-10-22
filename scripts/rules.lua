@@ -35,6 +35,40 @@ function rules.held_refusal(name, caster, held_now)
     return nil
 end
 
+-- Potency: how much the player's Insight strengthens Light effects (reach, light range, Rally's
+-- boost). This is the mod's own rule, not one read from the game: 1 with no Insight techniques, up
+-- to 1 + insight_bonus with all five. It is refreshed from a timer (character snapshots are read only
+-- there) and stays 1 where the runtime offers no skill details.
+local potency = 1
+
+function rules.potency()
+    return potency
+end
+
+-- Re-reads the player's Insight; true when the potency changed.
+function rules.refresh_potency()
+    if not api.has_capability("characters.read") then
+        return false
+    end
+    local ok, view = pcall(characters.snapshot, { details = true })
+    if not ok or not view then
+        return false
+    end
+    for _, row in ipairs(view.characters) do
+        local insight = row.is_player and row.skills and row.skills.insight
+        if insight and insight.active_techniques then
+            local level = math.max(0, math.min(5, insight.active_techniques))
+            local new = 1 + config.insight_bonus * level / 5
+            if new ~= potency then
+                potency = new
+                return true
+            end
+            return false
+        end
+    end
+    return false
+end
+
 function rules.instant_refusal(cost, caster)
     if caster and caster.focus < cost then
         return "not enough focus"

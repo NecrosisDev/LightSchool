@@ -2,13 +2,18 @@
 
 The game picks a power's icon from its school's sheet in 512x512 cells: cell (power & 0xff) - 1,
 left to right and top to bottom, cells per row = sheet width / 512 (0x1d5c00, 0x1d3e30). Each cell
-is a painted scene inside a black disc. This sheet is 2048x2048 (four cells per row) with six:
+is a painted scene inside a black disc, usually with a figure or hand working the power; each cell
+here has the caster's hand reaching toward the effect. This sheet is 2048x2048 (four cells per row)
+with nine:
   1 Light Orb  a warm-white orb hovering in a dark stone alcove
   2 Kindle     a wall torch bursting into flame, sparks rising
   3 Snuff      a smoking, freshly put-out wall torch in cold dark
   4 Flare      a blinding white burst with sharp rays and a shock ring
-  5 Sanctuary  a calm column of light settling on a glowing floor ring
+  5 Radiance   a column of light settling on a glowing floor ring
   6 Beacon     a small steady star left hanging in the dark
+  7 Guiding    a raised light crowned with warm rays
+  8 Glare      a narrow searing beam thrown from the palm
+  9 Searing    a hanging star burning a ringed, branded floor below it
 Nothing is copied from the game. Needs only Pillow.
 
     python -X utf8 -B mods/light-orb/icon.py out.png
@@ -42,6 +47,78 @@ def gauss(dx: float, dy: float, sx: float, sy: float) -> float:
     return math.exp(-((dx / sx) ** 2 + (dy / sy) ** 2))
 
 
+# The caster's hand reaching toward each effect, as the game's own power icons show a figure or hand
+# working the power: (angle the fingers point, radians in image space; wrist distance from the light;
+# finger spread; finger curl 0..1).
+HAND_POSES = {
+    'orb': (-1.2, 250, 0.22, 0.1),
+    'kindle': (-0.55, 235, 0.18, 0.2),
+    'snuff': (-0.35, 160, 0.05, 0.6),
+    'flare': (-math.pi / 2, 235, 0.32, 0.0),
+    'sanctuary': (-math.pi / 2, 205, 0.26, 0.05),
+    'beacon': (-1.0, 240, 0.2, 0.3),
+    'rally': (-math.pi / 2 + 0.25, 225, 0.3, 0.0),
+    'glare': (-0.15, 270, 0.12, 0.1),
+    'hallowed': (-1.3, 230, 0.24, 0.15),
+}
+HAND_SCALE = 1.1
+SKIN = (0.62, 0.42, 0.32)
+SUPERSAMPLE = 2
+
+
+def hand_mask(lx: float, ly: float, pose) -> tuple[list[float], list[float]]:
+    """Coverage of a right hand seen from the back (0..1, row-major), and the same mask blurred,
+    whose slope gives the hand's rounded shading."""
+    from PIL import ImageDraw
+    angle, reach, spread, curl = pose
+    s, k = HAND_SCALE, SUPERSAMPLE
+    ux, uy = math.cos(angle), math.sin(angle)
+    wx, wy = lx - ux * reach, ly - uy * reach
+    big = Image.new('L', (CELL * k, CELL * k))
+    pen = ImageDraw.Draw(big)
+
+    def limb(x0, y0, x1, y1, width):
+        pen.line([(x0 * k, y0 * k), (x1 * k, y1 * k)], fill=255, width=int(width * k))
+        for x, y in ((x0, y0), (x1, y1)):
+            r = width * k / 2
+            pen.ellipse([x * k - r, y * k - r, x * k + r, y * k + r], fill=255)
+
+    limb(wx - ux * 400, wy - uy * 400, wx, wy, 78 * s)                       # forearm, off the disc
+    px, py = wx + ux * 52 * s, wy + uy * 52 * s
+    r = 50 * s * k
+    pen.ellipse([px * k - r, py * k - r * 1.05, px * k + r, py * k + r * 1.05], fill=255)   # palm
+    for i, length in enumerate((88, 100, 96, 80)):                              # index .. little finger
+        offset = (i - 1.5) * 22 * s
+        bx, by = px + ux * 38 * s - uy * offset, py + uy * 38 * s + ux * offset
+        a = angle + (i - 1.5) * spread
+        n = length * s * (1 - 0.6 * curl)
+        limb(bx, by, bx + math.cos(a) * n, by + math.sin(a) * n, 21 * s)
+    ta = angle - 0.95                                                            # thumb
+    tx, ty = px - uy * 40 * s, py + ux * 40 * s
+    n = 70 * s * (1 - 0.4 * curl)
+    limb(tx, ty, tx + math.cos(ta) * n, ty + math.sin(ta) * n, 24 * s)
+    small = big.resize((CELL, CELL), Image.LANCZOS)
+    soft = small.filter(ImageFilter.GaussianBlur(9))
+    return [v / 255 for v in small.tobytes()], [v / 255 for v in soft.tobytes()]
+
+
+def shade_hand(rgb, i, x, y, lx, ly, tint, strength, coverage, soft, rough):
+    """Skin lit from the effect: a strong rim on edges facing the light, soft fill elsewhere."""
+    a = coverage[i]
+    if a <= 0:
+        return rgb
+    gx = soft[i + 1] - soft[i - 1] if 0 < x < CELL - 1 else 0.0
+    gy = soft[i + CELL] - soft[i - CELL] if 0 < y < CELL - 1 else 0.0
+    dx, dy = lx - x, ly - y
+    distance = math.hypot(dx, dy) or 1.0
+    # The blurred mask falls off toward the hand's edges, so -gradient points out of the hand.
+    facing = max(0.0, -(gx * dx + gy * dy) / distance) * 9.0
+    near = strength / (1.0 + (distance / 130.0) ** 2)
+    grain = 0.85 + 0.3 * rough[i]
+    skin = [c * grain * (0.04 + near * (0.22 + 2.4 * min(facing, 1.0)) * t) for c, t in zip(SKIN, tint)]
+    return [b * (1 - a) + h * a for b, h in zip(rgb, skin)]
+
+
 def cell(kind: str, rng: random.Random) -> Image.Image:
     rough, coarse, wisp = noise(rng, 5), noise(rng, 3), noise(rng, 4)
     half = CELL / 2
@@ -52,12 +129,19 @@ def cell(kind: str, rng: random.Random) -> Image.Image:
         lx, ly, falloff, tint, ambient = CELL * 0.5, CELL * 0.47, 230.0, (1.0, 0.95, 0.85), (0.35, 0.45, 0.7)
     elif kind == 'sanctuary':
         lx, ly, falloff, tint, ambient = CELL * 0.5, CELL * 0.62, 150.0, (1.0, 0.9, 0.68), (0.45, 0.55, 0.85)
+    elif kind == 'rally':
+        lx, ly, falloff, tint, ambient = CELL * 0.5, CELL * 0.3, 160.0, (1.0, 0.82, 0.5), (0.4, 0.45, 0.6)
     elif kind == 'beacon':
         lx, ly, falloff, tint, ambient = CELL * 0.58, CELL * 0.4, 80.0, (0.7, 0.85, 1.0), (0.3, 0.35, 0.5)
+    elif kind == 'glare':
+        lx, ly, falloff, tint, ambient = CELL * 0.62, CELL * 0.45, 70.0, (1.0, 0.98, 0.92), (0.3, 0.35, 0.5)
+    elif kind == 'hallowed':
+        lx, ly, falloff, tint, ambient = CELL * 0.5, CELL * 0.3, 140.0, (1.0, 0.62, 0.3), (0.35, 0.3, 0.3)
     elif kind == 'kindle':
         lx, ly, falloff, tint, ambient = CELL * 0.5, CELL * 0.36, 95.0, (1.0, 0.62, 0.28), (0.3, 0.3, 0.4)
     else:
         lx, ly, falloff, tint, ambient = CELL * 0.5, CELL * 0.36, 40.0, (0.9, 0.35, 0.15), (0.45, 0.6, 1.0)
+    coverage, soft = hand_mask(lx, ly, HAND_POSES[kind])
     strength = 1.6 if kind != 'snuff' else 0.35
     ambient_level = 0.035 if kind != 'snuff' else 0.12
     count = 46 if kind != 'snuff' else 0
@@ -101,6 +185,26 @@ def cell(kind: str, rng: random.Random) -> Image.Image:
                 halo = math.exp(-(r / 60.0) ** 2) * 0.45
                 pool = gauss(dx, dy - 200, 90, 18) * 0.35
                 add = (core * 0.9 + halo * 0.7 + pool * 0.6, core + halo * 0.85 + pool * 0.75, core + halo + pool)
+            elif kind == 'rally':
+                # A raised light with a warm crown of rays spreading outward, lighting the space around it.
+                core = math.exp(-(r / 26.0) ** 2) * 1.9
+                crown = math.exp(-((r - 90.0) / 16.0) ** 2) * (0.5 + 0.5 * math.cos(math.atan2(dy, dx) * 16)) ** 3 * 0.9
+                glow = math.exp(-(r / 130.0) ** 2) * 0.4
+                add = (core + crown + glow, core + crown * 0.85 + glow * 0.8, core * 0.85 + crown * 0.5 + glow * 0.5)
+            elif kind == 'glare':
+                # A narrow searing beam thrown sideways from the palm, brightest at its tip.
+                beam = gauss(0, dy, 1, 7 + 0.05 * max(dx + 120, 0)) * (1.0 if -120 < dx < 230 else 0.0) * math.exp(-max(dx, 0) / 260.0) * 1.2
+                core = math.exp(-(r / 16.0) ** 2) * 2.2
+                streak = (0.5 + 0.5 * math.cos(math.atan2(dy, dx) * 4)) ** 30 * math.exp(-r / 120.0) * 0.8
+                add = (core + beam + streak, core + beam * 0.97 + streak * 0.95, core + beam * 0.9 + streak * 0.85)
+            elif kind == 'hallowed':
+                # A hanging star whose light falls in a pale cone onto a floor marked with a ring and cross.
+                core = math.exp(-(r / 13.0) ** 2) * 1.8
+                cone = gauss(dx, 0, 30 + 0.45 * max(dy, 0), 1) * (1.0 if dy > 0 else 0.0) * math.exp(-max(dy, 0) / 420.0) * 0.4
+                fx, fy = dx, (dy - 210) * 3.0
+                ring = math.exp(-((math.hypot(fx, fy) - 110.0) / 8.0) ** 2) * 0.9
+                cross = (gauss(fx, 0, 4, 1) + gauss(0, fy, 1, 4)) * (1.0 if math.hypot(fx, fy) < 100 else 0.0) * 0.7
+                add = (core + cone + ring + cross, core * 0.8 + cone * 0.6 + ring * 0.55 + cross * 0.55, core * 0.55 + cone * 0.3 + ring * 0.25 + cross * 0.25)
             elif kind == 'sanctuary':
                 # A soft column of light settling onto a glowing ring on the floor.
                 column = gauss(dx, 0, 46, 1) * (0.35 + 0.65 * max(0.0, min(1.0, (y - 40) / 260.0))) * (0.7 + 0.5 * wisp[i]) * 0.8
@@ -130,6 +234,7 @@ def cell(kind: str, rng: random.Random) -> Image.Image:
                     smoke = gauss(curl, 0, 8 + 0.12 * max(-dy, 0), 1) * (0.25 + 0.75 * wisp[i]) * (math.exp(dy / 220.0) if dy < 0 else 0.0) * 0.55
                     add = (ember + smoke * 0.55, ember * 0.25 + smoke * 0.6, ember * 0.08 + smoke * 0.72)
             rgb = [c + a for c, a in zip(rgb, add)]
+            rgb = shade_hand(rgb, i, x, y, lx, ly, tint, strength, coverage, soft, rough)
             if motes and r < 260:
                 spark = 0.0
                 for mx, my, s, b in motes:
@@ -144,10 +249,24 @@ def cell(kind: str, rng: random.Random) -> Image.Image:
             pixels.append(tuple(int(255 * max(0.0, min(1.0, (1 - math.exp(-c * 1.25)) * frame)) ** (1 / 1.1)) for c in rgb))
     image = Image.new('RGB', (CELL, CELL))
     image.putdata(pixels)
-    return image.filter(ImageFilter.GaussianBlur(0.6))
+    return sepia(image).filter(ImageFilter.GaussianBlur(0.6))
 
 
-KINDS = ('orb', 'kindle', 'snuff', 'flare', 'sanctuary', 'beacon')   # power numbers 1..6
+# The game's power pages show dark, warm sepia scenes in which only the power itself keeps its colour.
+SEPIA_DARK, SEPIA_LIGHT = (0, 0, 0), (236, 214, 176)   # black stays black: the disc frame
+SEPIA_AMOUNT = 0.7
+
+
+def sepia(image: Image.Image) -> Image.Image:
+    """Tone the scene toward sepia, keeping more of the original colour in the brightest parts."""
+    from PIL import ImageOps
+    gray = ImageOps.grayscale(image)
+    toned = ImageOps.colorize(gray, SEPIA_DARK, SEPIA_LIGHT)
+    keep_original = gray.point(lambda v: int(255 * (1 - SEPIA_AMOUNT * (1 - (v / 255) ** 3))))
+    return Image.composite(image, toned, keep_original)
+
+
+KINDS = ('orb', 'kindle', 'snuff', 'flare', 'sanctuary', 'beacon', 'rally', 'glare', 'hallowed')   # power numbers 1..9
 COLUMNS = 4                                                  # a 2048 sheet, like the Force school's
 
 
