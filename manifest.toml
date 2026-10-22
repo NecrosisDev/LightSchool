@@ -1,0 +1,18 @@
+[plugin]
+name = "Light School"
+version = "0.9.2"
+
+[script]
+runtime = "com.necrosis.script-runtime"
+entry = "scripts/main.lua"
+requires = ["powers.cast", "powers.focus", "world.lights", "events.lifecycle", "timers"]
+# Kindle and Snuff need the world ones, Sanctuary and Beacon the character ones, the Mod Settings page ui.settings, cast sounds ui.sound;
+# everything else works without them.
+optional = ["world.read", "world.devices", "characters.awareness", "characters.attitude.write", "ui.settings", "characters.read", "ui.sound"]
+
+[script.modules]
+config = "scripts/config.lua"
+rules = "scripts/rules.lua"
+effects = "scripts/effects.lua"
+settings_page = "scripts/settings_page.lua"
+feedback = "scripts/feedback.lua"
