@@ -1,6 +1,6 @@
 [plugin]
 name = "Light School"
-version = "0.18.1"
+version = "0.18.2"
 category = "Gameplay"
 
 [script]
